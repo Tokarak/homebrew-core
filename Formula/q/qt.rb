@@ -3,6 +3,10 @@ class Qt < Formula
 
   desc "Cross-platform application and UI framework"
   homepage "https://www.qt.io/"
+  url "https://download.qt.io/official_releases/qt/6.7/6.7.0/single/qt-everywhere-src-6.7.0.tar.xz"
+  mirror "https://qt.mirror.constant.com/archive/qt/6.7/6.7.0/single/qt-everywhere-src-6.7.0.tar.xz"
+  mirror "https://mirrors.ukfast.co.uk/sites/qt.io/archive/qt/6.7/6.7.0/single/qt-everywhere-src-6.7.0.tar.xz"
+  sha256 "bf5089912364f99cf9baf6c109de76a3172eec6267f148c69800575c47f90087"
   license all_of: [
     "BSD-3-Clause",
     "GFDL-1.3-no-invariants-only",
@@ -10,22 +14,7 @@ class Qt < Formula
     { "GPL-3.0-only" => { with: "Qt-GPL-exception-1.0" } },
     "LGPL-3.0-only",
   ]
-  revision 2
   head "https://code.qt.io/qt/qt5.git", branch: "dev"
-
-  stable do
-    url "https://download.qt.io/official_releases/qt/6.6/6.6.2/single/qt-everywhere-src-6.6.2.tar.xz"
-    mirror "https://qt.mirror.constant.com/archive/qt/6.6/6.6.2/single/qt-everywhere-src-6.6.2.tar.xz"
-    mirror "https://mirrors.ukfast.co.uk/sites/qt.io/archive/qt/6.6/6.6.2/single/qt-everywhere-src-6.6.2.tar.xz"
-    sha256 "3c1e42b3073ade1f7adbf06863c01e2c59521b7cc2349df2f74ecd7ebfcb922d"
-
-    # Fix build with newer libc++.
-    patch do
-      url "https://github.com/google/angle/commit/c23029d2fe0a55a5b26cd8005f0bf74943ed3865.patch?full_index=1"
-      sha256 "c6aa0f3237001e9ad9ed17dab671a2f402aa0060012a90349113f6cf9c0c95c1"
-      directory "qtwebengine/src/3rdparty/chromium/third_party/angle"
-    end
-  end
 
   # The first-party website doesn't make version information readily available,
   # so we check the `head` repository tags instead.
@@ -48,7 +37,7 @@ class Qt < Formula
   depends_on "ninja" => :build
   depends_on "node" => :build
   depends_on "pkg-config" => :build
-  depends_on "python@3.11" => :build # Python 3.12 needs newer Chromium without imp usage (maybe 118 or 120)
+  depends_on "python@3.12" => :build
   depends_on "vulkan-headers" => [:build, :test]
   depends_on "vulkan-loader" => [:build, :test]
   depends_on xcode: :build
@@ -141,18 +130,23 @@ class Qt < Formula
     sha256 "b36a1c245f2d304965eb4e0a82848379241dc04b865afcc4aab16748587e1923"
   end
 
+  # Patch to allow QtWebEngine to build with ninja>=1.12.0.
+  # TODO: Remove or replace with upstream commit once fixed upstream.
+  # Issue ref: https://bugreports.qt.io/browse/QTBUG-124375
+  patch :DATA
+
   def install
+    python3 = "python3.12"
+
     # Allow -march options to be passed through, as Qt builds
     # arch-specific code with runtime detection of capabilities:
     # https://bugreports.qt.io/browse/QTBUG-113391
     ENV.runtime_cpu_detection
 
-    python = "python3.11"
     # Install python dependencies for QtWebEngine
-    venv_root = buildpath/"venv"
-    venv = virtualenv_create(venv_root, python)
+    venv = virtualenv_create(buildpath/"venv", python3)
     venv.pip_install resources
-    ENV.prepend_path "PYTHONPATH", venv_root/Language::Python.site_packages(python)
+    ENV.prepend_path "PYTHONPATH", venv.site_packages
 
     # FIXME: GN requires clang in clangBasePath/bin
     inreplace "qtwebengine/src/3rdparty/chromium/build/toolchain/apple/toolchain.gni",
@@ -187,62 +181,65 @@ class Qt < Formula
       -archdatadir share/qt
       -datadir share/qt
       -examplesdir share/qt/examples
+      -hostdatadir share/qt/mkspecs
       -testsdir share/qt/tests
 
-      -no-feature-relocatable
+      -feature-webengine-kerberos
+      -pkg-config
       -system-harfbuzz
       -system-sqlite
+      -webengine-proprietary-codecs
 
+      -no-feature-clang
+      -no-feature-relocatable
       -no-sql-mysql
       -no-sql-odbc
       -no-sql-psql
     ]
 
-    cmake_args = std_cmake_args(install_prefix: HOMEBREW_PREFIX, find_framework: "FIRST") + %w[
-      -DFEATURE_pkg_config=ON
-      -DINSTALL_MKSPECSDIR=share/qt/mkspecs
-      -DQT_FEATURE_webengine_proprietary_codecs=ON
-      -DQT_FEATURE_webengine_kerberos=ON
-      -DQT_ALLOW_SYMLINK_IN_PATHS=ON
-    ]
+    cmake_args = %w[-DQT_ALLOW_SYMLINK_IN_PATHS=ON]
 
     if OS.mac?
-      # Fix a regression in Qt 6.5.2 w.r.t. system libpng
-      # https://bugreports.qt.io/browse/QTBUG-115357
-      cmake_args << "-DQT_FEATURE_webengine_system_libpng=OFF"
-
       cmake_args << "-DCMAKE_OSX_DEPLOYMENT_TARGET=#{MacOS.version}.0"
-      config_args << "-sysroot" << MacOS.sdk_path.to_s
+
+      config_args += %W[
+        -sysroot #{MacOS.sdk_path}
+        -no-feature-ffmpeg
+      ]
+      # FIXME: Workaround for error: use of undeclared identifier 'importMemoryHandleInfo'
+      # Remove once properly handled by Qt.
+      config_args << "-no-feature-webengine-vulkan"
       # NOTE: `chromium` should be built with the latest SDK because it uses
       # `___builtin_available` to ensure compatibility.
-      config_args << "-skip" << "qtwebengine" if DevelopmentTools.clang_build_version <= 1200
+      config_args += %w[-skip qtwebengine] if DevelopmentTools.clang_build_version <= 1200
     else
       # Explicitly specify QT_BUILD_INTERNALS_RELOCATABLE_INSTALL_PREFIX so
       # that cmake does not think $HOMEBREW_PREFIX/lib is the install prefix.
       cmake_args << "-DQT_BUILD_INTERNALS_RELOCATABLE_INSTALL_PREFIX=#{prefix}"
 
-      # The vendored copy of libjpeg is also used instead of the brewed copy, because the build
-      # fails due to a missing symbol otherwise.
-      # On macOS chromium will always use bundled copies and the QT_FEATURE_webengine_system_*
-      # arguments are ignored.
-      cmake_args += %w[
-        -DQT_FEATURE_webengine_system_alsa=ON
-        -DQT_FEATURE_webengine_system_ffmpeg=ON
-        -DQT_FEATURE_webengine_system_icu=ON
-        -DQT_FEATURE_webengine_system_libevent=ON
-        -DQT_FEATURE_webengine_system_libpng=ON
-        -DQT_FEATURE_webengine_system_libxml=ON
-        -DQT_FEATURE_webengine_system_libwebp=ON
-        -DQT_FEATURE_webengine_system_minizip=ON
-        -DQT_FEATURE_webengine_system_opus=ON
-        -DQT_FEATURE_webengine_system_poppler=ON
-        -DQT_FEATURE_webengine_system_pulseaudio=ON
-        -DQT_FEATURE_webengine_system_zlib=ON
+      # The vendored copy of libjpeg is also used instead of the brewed copy,
+      # because the build fails due to a missing symbol otherwise.
+      # On macOS chromium will always use bundled copies and the -feature-webengine-system-*
+      # (and matching QT_FEATURE_webengine_system_*) arguments are ignored.
+      # As of Qt 6.6.0, webengine-ozone-x11 feature appears to be mandatory for Linux.
+      config_args += %w[
+        -feature-webengine-system-alsa
+        -feature-webengine-system-ffmpeg
+        -feature-webengine-system-icu
+        -feature-webengine-system-libevent
+        -feature-webengine-system-libpng
+        -feature-webengine-system-libxml
+        -feature-webengine-system-libwebp
+        -feature-webengine-system-minizip
+        -feature-webengine-system-opus
+        -feature-webengine-system-poppler
+        -feature-webengine-system-pulseaudio
+        -feature-webengine-system-zlib
+        -feature-webengine-ozone-x11
       ]
-
-      # As of Qt 6.6.0, this feature appears to be mandatory for Linux.
-      cmake_args << "-DQT_FEATURE_webengine_ozone_x11=ON"
     end
+
+    cmake_args += std_cmake_args(install_prefix: HOMEBREW_PREFIX, find_framework: "FIRST")
 
     system "./configure", *config_args, "--", *cmake_args
     system "cmake", "--build", "."
@@ -341,7 +338,7 @@ class Qt < Formula
         3DCore Svg Quick3D Network NetworkAuth WebEngineCore REQUIRED)
 
       add_executable(test
-          main.cpp
+        main.cpp
       )
 
       target_link_libraries(test PRIVATE Qt6::Core Qt6::Widgets
@@ -402,7 +399,7 @@ class Qt < Formula
       }
     EOS
 
-    ENV["QT_VULKAN_LIB"] = Formula["vulkan-loader"].opt_lib/(shared_library "libvulkan")
+    ENV["QT_VULKAN_LIB"] = Formula["vulkan-loader"].opt_lib/shared_library("libvulkan")
     ENV["QT_QPA_PLATFORM"] = "minimal" if OS.linux? && ENV["HOMEBREW_GITHUB_ACTIONS"]
 
     system "cmake", testpath
@@ -415,3 +412,30 @@ class Qt < Formula
     system "./test"
   end
 end
+
+__END__
+diff --git a/qtwebengine/src/3rdparty/chromium/content/public/browser/BUILD.gn b/qtwebengine/src/3rdparty/chromium/content/public/browser/BUILD.gn
+index d38fa8d..616834b 100644
+--- a/qtwebengine/src/3rdparty/chromium/content/public/browser/BUILD.gn
++++ b/qtwebengine/src/3rdparty/chromium/content/public/browser/BUILD.gn
+@@ -538,6 +538,7 @@ jumbo_source_set("browser_sources") {
+     "//build:chromeos_buildflags",
+     "//cc",
+     "//components/services/storage/public/cpp",
++    "//components/spellcheck:buildflags",
+     "//components/viz/host",
+     "//content/browser",  # Must not be public_deps!
+     "//device/fido",
+diff --git a/qtwebengine/src/3rdparty/chromium/extensions/browser/BUILD.gn b/qtwebengine/src/3rdparty/chromium/extensions/browser/BUILD.gn
+index e93f0f7..ef9a950 100644
+--- a/qtwebengine/src/3rdparty/chromium/extensions/browser/BUILD.gn
++++ b/qtwebengine/src/3rdparty/chromium/extensions/browser/BUILD.gn
+@@ -741,6 +741,9 @@ jumbo_source_set("browser_sources") {
+       "//components/web_cache/browser",
+       "//components/web_cache/browser:browser",
+     ]
++    deps += [
++      "//components/web_cache/public/mojom",
++    ]
+   }
+ }
